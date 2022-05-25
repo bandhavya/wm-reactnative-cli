@@ -3,7 +3,22 @@
 const {
     ejectProject, build
 } = require('./src/command');
+const os = require('os');
+const { LocalStorage } = require('node-localstorage');
+const {
+    runExpo
+} = require('./src/expo-launcher');
+const updateNotifier = require('update-notifier');
+const pkg = require('./package.json');
+updateNotifier({
+    pkg: pkg,
+    updateCheckInterval : 60 * 60 * 1000
+}).notify({
+	defer: false
+});
 
+global.rootDir = `${os.homedir()}/.wm-reactnative-cli`;
+global.localStorage = new LocalStorage(`${global.rootDir}/.store`);
 // src is the web react native project zip
 const args = require('yargs')
     .command('build', 'build the project to generate android and ios folders', yargs => {
@@ -33,6 +48,12 @@ const args = require('yargs')
                     describe: '(Android) password for key.',
                     type: 'string'
                 })
+                .option('p', {
+                    alias: 'packageType',
+                    describe: 'apk (or) bundle',
+                    default: 'apk',
+                    choices: ['apk', 'bundle']
+                })
             }, args => {
                 args.platform = 'android';
                 build(args)
@@ -52,11 +73,6 @@ const args = require('yargs')
                     alias: 'iProvisioningFile',
                     describe: '(iOS) path of the provisional profile to use',
                     type: 'string'
-                })
-                .option('icsi', {
-                    alias: 'iCodeSigningIdentity',
-                    describe: 'Common Name of the Developer iOS certificate stored in the Keychain Access application',
-                    type: 'string'
                 });
             }, args => {
                 args.platform = 'ios';
@@ -73,11 +89,20 @@ const args = require('yargs')
                 describe: 'dest folder where the react native project will be extracted to',
                 type: 'string'
             })
-            .option('p', {
-                alias: 'packageType',
-                describe: 'development (or) release',
-                default: 'development',
-                choices: ['development', 'production']
+            .option('bt', {
+                alias: 'buildType',
+                describe: 'development (or) debug (or) production (or) release',
+                default: 'debug',
+                coerce: (val) => {
+                    if (val === 'development') {
+                        return 'debug';
+                    }
+                    if (val === 'production') {
+                        return 'release';
+                    }
+                    return val;
+                },
+                choices: ['development', 'debug', 'production', 'release']
             })
             .option('localrnruntimepath', {
                 alias: 'localrnruntimepath',
@@ -90,6 +115,23 @@ const args = require('yargs')
                 default: false,
                 type: 'boolean'
             })
+    })
+    .command('run expo <previewUrl>',
+        'launch local expo with a wavemaker project as source',
+        yargs => {
+            yargs.option('web', {
+                describe: 'If set to true then web will be started.',
+                default: false,
+                type: 'boolean'
+            });
+            yargs.option('clean', {
+                describe: 'If set to true then all existing folders are removed.',
+                default: false,
+                type: 'boolean'
+            });
+        },
+        (args) => {
+            runExpo(args.previewUrl, args.web, args.clean)
     })
     .help('h')
     .alias('h', 'help').argv;

@@ -1,17 +1,12 @@
 const fs = require('fs-extra');
-const execa = require('execa');
 const logger = require('./logger');
-const plist = require('plist');
-const path = require('path');
 const config = require('./config');
-const exec = require('./exec');
+const {
+    exec
+} = require('./exec');
 
 const {
     validateForAndroid,
-    hasValidNodeVersion,
-    hasValidJavaVersion,
-    checkForGradleAvailability,
-    isGitInstalled,
     checkForAndroidStudioAvailability
  } = require('./requirements');
 
@@ -28,13 +23,13 @@ function setKeyStoreValuesInGradleProps(content, keystoreName, ksData) {
     return content;
 }
 // Reference: http://reactnative.dev/docs/signed-apk-android
-async function generateSignedApk(keyStore, storePassword, keyAlias, keyPassword) {
+async function generateSignedApk(keyStore, storePassword, keyAlias, keyPassword, packageType) {
     const ksData = {storePassword: storePassword, keyAlias: keyAlias, keyPassword: keyPassword};
     const namesArr = keyStore.split('/');
     const keystoreName = namesArr[namesArr.length - 1];
     const filepath = config.src + 'android/app/' + keystoreName;
 
-    fs.copyFileSync(ksData.keyStore, filepath);
+    fs.copyFileSync(keyStore, filepath);
 
     // edit file android/gradle.properties
     const gradlePropsPath = config.src + 'android/gradle.properties';
@@ -48,7 +43,7 @@ async function generateSignedApk(keyStore, storePassword, keyAlias, keyPassword)
     let content = fs.readFileSync(appGradlePath, 'utf8');
     content = await updateSigningConfig(content);
     fs.writeFileSync(appGradlePath, content);
-    await generateAab();
+    await generateAab(packageType);
 }
 
 function updateSigningConfig(content) {
@@ -67,6 +62,20 @@ function updateSigningConfig(content) {
     return content;
 }
 
+function updateJSEnginePreference() {
+    const jsEngine = require(config.src + 'app.json').expo.jsEngine;
+    const gradlePropsPath = config.src + 'android/gradle.properties';
+    if (fs.existsSync(gradlePropsPath)) {
+        let data = fs.readFileSync(gradlePropsPath, 'utf8');
+        data = data.replace(/expo\.jsEngine=(jsc|hermes)/, `expo.jsEngine=${jsEngine}`)
+        fs.writeFileSync(gradlePropsPath, data);
+        logger.info({
+            label: loggerLabel,
+            message: `js engine is set as ${jsEngine}`
+        });
+    }
+}
+
 function setSigningConfigInGradle() {
     const gradlePath = config.src + 'android/app/build.gradle';
 
@@ -77,45 +86,39 @@ function setSigningConfigInGradle() {
     generateAab();
 }
 
-async function generateAab() {
-    try {
-        await execa('./gradlew', ['clean'], {
-            cwd: config.src + 'android'
-        });
-        await execa('./gradlew', [':app:bundleRelease'], {
-            cwd: config.src + 'android'
-        });
+function addKeepFileEntries() {
+    fs.mkdirSync(config.src + 'android/app/src/main/res/raw/', {recursive: true});
+    const data = `<?xml version="1.0" encoding="utf-8"?>
+    <resources xmlns:tools="http://schemas.android.com/tools"
+tools:keep="@raw/*_fontawesome,@raw/*__streamlinelighticon, @raw/*_wavicon, @raw/*_streamlineregularicon" />`;
+    fs.appendFileSync(config.src + 'android/app/src/main/res/raw/keep.xml', data);
+}
 
-        await execa('react-native', ['run-android', '--variant=release'], {
-            cwd: config.src
+
+async function generateAab(packageType) {
+    try {
+        // addKeepFileEntries();
+        await exec('./gradlew', ['clean'], {
+            cwd: config.src + 'android'
         });
+        logger.info('****** invoking aab build *****');
+        if (packageType === 'bundle') {
+            await exec('./gradlew', [':app:bundleRelease'], {
+                cwd: config.src + 'android'
+            });
+        } else {
+            await exec('./gradlew', ['assembleRelease'], {
+                cwd: config.src + 'android'
+            });
+        }
     }
     catch(e) {
         console.error('error generating release apk. ', e);
+        return {
+            success: false,
+            errors: e
+        }
     }
-}
-
-function setDebugFlagInGradle(content) {
-    let newContent;
-    if (content.search(`entryFile: "index.js"`) === -1) {
-    newContent = content.replace(/^(?!\s)project\.ext\.react = \[/gm, `project.ext.react = [
-        entryFile: "index.js",
-        bundleAssetName: "index.android.bundle",
-        bundleInDebug: true,
-        devDisabledInDebug: true,`);
-    } else {
-        newContent = content.replace(/bundleInDebug\: false/gm, `bundleInDebug: true`)
-        .replace(/devDisabledInDebug\: false/gm, `devDisabledInDebug: true`);
-    }
-	return newContent;
-}
-function setReleaseFlagInGradle(content) {
-    const newContent = content.replace(/^(?!\s)project\.ext\.react = \[/gm, `project.ext.react = [
-        entryFile: "index.js",
-        bundleAssetName: "index.android.bundle",
-        bundleInRelease: true,`);
-
-	return newContent;
 }
 
 const endWith = (str, suffix) => {
@@ -131,29 +134,73 @@ function findFile(path, nameregex) {
     return endWith(path, '/') + f;
 }
 
-async function updateAndroidBuildGradleFile(type) {
-    const path = config.src + 'android/app/build.gradle';
-    let data = fs.readFileSync(path, 'utf8');
-    console.log(data);
-
-    let content = fs.readFileSync(path, 'utf8');
-    content = type === 'production' ? await setReleaseFlagInGradle(content) : await setDebugFlagInGradle(content);
-    await fs.writeFileSync(path, content);
+function addProguardRule() {
+    const proguardRulePath = config.src + 'android/app/proguard-rules.pro';
+    if (fs.existsSync(proguardRulePath)) {
+        var data = `-keep class com.facebook.react.turbomodule.** { *; }`;
+        fs.appendFileSync(proguardRulePath,data, 'utf8');
+        logger.info('***** added proguard rule ******')
+    }
 }
 
-async function updateSettingsGradleFile(appName) {
+function updateOptimizationFlags() {
+    logger.info('***** into optimization ******')
+    const buildGradlePath = config.src + 'android/app/build.gradle';
+    if (fs.existsSync(buildGradlePath)) {
+        let content = fs.readFileSync(buildGradlePath, 'utf8');
+        if (content.search(`def enableProguardInReleaseBuilds = false`) > -1) {
+            content = content.replace(/def enableProguardInReleaseBuilds = false/gm, `def enableProguardInReleaseBuilds = true`)
+                .replace(/minifyEnabled enableProguardInReleaseBuilds/gm, `minifyEnabled enableProguardInReleaseBuilds\n shrinkResources false\n`);
+        }
+        fs.writeFileSync(buildGradlePath, content);
+    }
+}
+
+function updateAndroidBuildGradleFile(type) {
+    const buildGradlePath = config.src + 'android/app/build.gradle';
+    if (fs.existsSync(buildGradlePath)) {
+        let content = fs.readFileSync(buildGradlePath, 'utf8');
+        if (type === 'release') {
+            if (content.search(`entryFile: "index.js"`) === -1) {
+                content = content.replace(/^(?!\s)project\.ext\.react = \[/gm, `project.ext.react = [
+        entryFile: "index.js",
+        bundleAssetName: "index.android.bundle",
+        bundleInRelease: true,`);
+            } else {
+                content = content.replace(/bundleInDebug\: true/gm, `bundleInDebug: false,
+        bundleInRelease: true,`).replace(/devDisabledInDebug\: true/gm, ``)
+                    .replace(/bundleInRelease\: false/gm, `bundleInRelease: true`);
+            }
+        } else {
+            if (content.search(`entryFile: "index.js"`) === -1) {
+                content = content.replace(/^(?!\s)project\.ext\.react = \[/gm, `project.ext.react = [
+        entryFile: "index.js",
+        bundleAssetName: "index.android.bundle",
+        bundleInDebug: true,
+        devDisabledInDebug: true,`);
+            } else {
+                content = content.replace(/bundleInDebug\: false/gm, `bundleInDebug: true`)
+                    .replace(/devDisabledInDebug\: false/gm, `devDisabledInDebug: true`)
+                    .replace(/bundleInRelease\: true/gm, `bundleInRelease: false`);
+            }
+        }
+        fs.writeFileSync(buildGradlePath, content);
+    }
+}
+
+function updateSettingsGradleFile(appName) {
     const path = config.src + 'android/settings.gradle';
     let content = fs.readFileSync(path, 'utf8');
     if (content.search(/^rootProject.name = \'\'/gm) > -1) {
         content = content.replace(/^rootProject.name = \'\'/gm, `rootProject.name = ${appName}`);
-        await fs.writeFileSync(path, content);
+        fs.writeFileSync(path, content);
     }
 }
 
 async function invokeAndroidBuild(args) {
     let keyStore, storePassword, keyAlias,keyPassword;
 
-    if (args.packageType === 'development' && !args.aKeyStore) {
+    if (args.buildType === 'debug' && !args.aKeyStore) {
         keyStore = __dirname + '/../defaults/android-debug.keystore';
         keyAlias = 'androiddebugkey';
         keyPassword = 'android';
@@ -165,15 +212,16 @@ async function invokeAndroidBuild(args) {
         keyPassword = args.aKeyPassword
     }
 
-    if (!await hasValidNodeVersion() || !await hasValidJavaVersion() ||
-        !await checkForGradleAvailability() || !await isGitInstalled() ||
-        !await checkForAndroidStudioAvailability()) {
+    if (!await checkForAndroidStudioAvailability()) {
         return {
             success: false
         }
     }
 
-    if (args.packageType === 'production') {
+    updateJSEnginePreference();
+    const appName = config.metaData.name;
+    updateSettingsGradleFile(appName);
+    if (args.buildType === 'release') {
         const errors = validateForAndroid(keyStore, storePassword, keyAlias, keyPassword);
         if (errors.length > 0) {
             return {
@@ -181,40 +229,48 @@ async function invokeAndroidBuild(args) {
                 errors: errors
             }
         }
-        await updateAndroidBuildGradleFile(args.packageType);
-        await generateSignedApk(keyStore, storePassword, keyAlias, keyPassword);
+        addProguardRule();
+        updateOptimizationFlags();
+        updateAndroidBuildGradleFile(args.buildType);
+        await generateSignedApk(keyStore, storePassword, keyAlias, keyPassword, args.packageType);
     } else {
-        await updateAndroidBuildGradleFile(args.packageType);
+        updateAndroidBuildGradleFile(args.buildType);
         logger.info({
             label: loggerLabel,
             message: 'Updated build.gradle file with debug configuration'
         });
-        if (!Object.keys(config.metaData).length) {
-            config.metaData = await config.setMetaInfo(config.src);
-        }
-        const appName = config.metaData.expo.name;
-
-        updateSettingsGradleFile(appName);
-        await execa('./gradlew', ['clean'], {
+        try {
+        await exec('./gradlew', ['assembleDebug'], {
             cwd: config.src + 'android'
         });
-        await execa('./gradlew', ['assembleDebug'], {
-            cwd: config.src + 'android'
-        });
-        logger.info({
-            label: loggerLabel,
-            message: 'build completed'
-        });
-        const output = args.dest + 'output/android/';
-        const outputFilePath = `${output}${appName}(${config.metaData.expo.version}).${args.packageType}.apk`;
-        const apkPath = findFile(`${args.dest}/android/app/build/outputs/apk/${args.packageType === 'production' ? 'release' : 'debug'}`, /\.apk?/);
-        fs.mkdirSync(output, {recursive: true});
-        fs.copyFileSync(apkPath, outputFilePath);
+    } catch(e) {
+        console.error('error generating release apk. ', e);
         return {
-            success: true,
-            output: outputFilePath
-        };
+            success: false,
+            errors: e
+        }
     }
+    }
+    logger.info({
+        label: loggerLabel,
+        message: 'build completed'
+    });
+    const output = args.dest + 'output/android/';
+    const outputFilePath = `${output}${appName}(${config.metaData.version}).${args.buildType}.${args.packageType === 'bundle' ? 'aab': 'apk'}`;
+
+    let bundlePath = null;
+    let folder = args.buildType === 'release' ? 'release' : 'debug';
+    if (args.packageType === 'bundle') {
+        bundlePath = findFile(`${args.dest}android/app/build/outputs/bundle/${folder}`, /\.aab?/);
+    } else {
+        bundlePath = findFile(`${args.dest}android/app/build/outputs/apk/${folder}`, /\.apk?/);
+    }
+    fs.mkdirSync(output, {recursive: true});
+    fs.copyFileSync(bundlePath, outputFilePath);
+    return {
+        success: true,
+        output: outputFilePath
+    };
 }
 
 module.exports = {

@@ -7,17 +7,18 @@ const logger = require('./logger');
 const {
     exec
 } = require('./exec');
-const loggerLabel = 'cordova-cli-requirements';
-const VERSIONS = {
-    'NODE': '12.0.0',
+const loggerLabel = 'rn-cli-requirements';
+let VERSIONS = {
+    'NODE': '14.0.0',
     'POD' : '1.9.0',
-    'JAVA': '1.8.0'
+    'JAVA': '11.0.0',
+    'REACT_NATIVE': '0.68.2',
+    'EXPO': '5.4.4',
 }
-let projectSrc;
 
 // check if expo cli is installed globally or not
 // gradle check
-async function checkAvailability(cmd, transformFn) {
+async function checkAvailability(cmd, transformFn, projectSrc) {
     try {
         let options = {};
         if (projectSrc) {
@@ -26,10 +27,10 @@ async function checkAvailability(cmd, transformFn) {
             }
         }
         let output = (await exec(cmd, ['--version'])).join('');
-        
+
         if (transformFn) {
-            output = transformFn(output);	
-        }	
+            output = transformFn(output);
+        }
         // to just return version in x.x.x format
         let version = output.match(/[0-9]+\.[0-9\.]+/)[0];
 
@@ -91,7 +92,7 @@ async function checkForAndroidStudioAvailability() {
             'message': 'Found Android SDK manager at ' + sdkPath
         });
         try {
-            await exec(sdkPath, ['--list']); 
+            await exec(sdkPath, ['--list']);
         } catch(e) {
             console.warn(e);
         }
@@ -111,7 +112,7 @@ async function hasValidJavaVersion() {
         return false;
     }
 
-    const envVariable = process.env['JAVA_HOME']; 
+    const envVariable = process.env['JAVA_HOME'];
 
     if (!envVariable) {
         logger.error({
@@ -139,6 +140,10 @@ async function hasValidNodeVersion() {
     return await checkAvailability('node');
 }
 
+async function hasValidExpoVersion() {
+    return await checkAvailability('expo');
+}
+
 function validateForAndroid(keyStore, storePassword, keyAlias, keyPassword) {
     let errors = [];
     if (!(keyStore && fs.existsSync(keyStore))) {
@@ -156,7 +161,7 @@ function validateForAndroid(keyStore, storePassword, keyAlias, keyPassword) {
     return errors;
 }
 
-function validateForIos(certificate, password, provisionalFilePath, packageType) {
+function validateForIos(certificate, password, provisionalFilePath, buildType) {
     let errors = [];
     if (!(certificate && fs.existsSync(certificate))) {
         errors.push(`p12 certificate does not exists : ${certificate}`);
@@ -167,7 +172,7 @@ function validateForIos(certificate, password, provisionalFilePath, packageType)
     if (!(provisionalFilePath && fs.existsSync(provisionalFilePath))) {
         errors.push(`Provisional file does not exists : ${provisionalFilePath}`);
     }
-    if (!packageType) {
+    if (!buildType) {
         errors.push('Package type is required.');
     }
     return errors;
@@ -189,7 +194,7 @@ async function showConfirmation(message) {
             if (err) {
                 reject();
             }
-            resolve(result.confirm.toLowerCase());  
+            resolve(result.confirm.toLowerCase());
         });
     });
 }
@@ -204,6 +209,8 @@ module.exports = {
     hasValidJavaVersion: hasValidJavaVersion,
     showConfirmation: showConfirmation,
     checkForAndroidStudioAvailability: checkForAndroidStudioAvailability,
-    checkForGradleAvailability: checkForGradleAvailability
+    checkForGradleAvailability: checkForGradleAvailability,
+    hasValidExpoVersion: hasValidExpoVersion,
+    VERSIONS: VERSIONS
 }
-// TODO check for expo-cli, react-native
+// TODO: support for multiple react native versions.
